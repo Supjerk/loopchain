@@ -52,8 +52,12 @@ class BlockChain:
     def __init__(self, blockchain_db=None, channel_name=None):
         if channel_name is None:
             channel_name = conf.LOOPCHAIN_DEFAULT_CHANNEL
+
         self.__block_height = -1
+        # last block in block db
         self.__last_block = None
+        # last unconfirmed block that the leader broadcast.
+        self.last_unconfirmed_block = None
         self.__save_tx_by_address_strategy = None
         self.__channel_name = channel_name
         self.__peer_id = ChannelProperty().peer_id
@@ -246,7 +250,7 @@ class BlockChain:
             finally:
                 self.__invoke_results.pop(block.header.hash, None)
 
-            next_total_tx = self.__write_block_data(block)
+            next_total_tx = self.__write_block_data(block, vote)
 
             self.__last_block = block
             self.__block_height = self.__last_block.header.height
@@ -273,7 +277,7 @@ class BlockChain:
 
             return True
 
-    def __write_block_data(self, block):
+    def __write_block_data(self, block: Block, vote: Vote = None):
         # a condition for the exception case of genesis block.
         next_total_tx = self.__total_tx
         if block.header.height > 0:
@@ -296,6 +300,12 @@ class BlockChain:
             BlockChain.BLOCK_HEIGHT_KEY +
             block.header.height.to_bytes(conf.BLOCK_HEIGHT_BYTES_LEN, byteorder='big'),
             block_hash_encoded)
+
+        if vote:
+            batch.Put(
+                BlockChain.BLOCK_INFO_KEY + block_hash_encoded,
+                Vote.save_to(vote)
+            )
 
         self.__confirmed_block_db.Write(batch)
 
@@ -613,6 +623,10 @@ class BlockChain:
         :param current_block: Next unconfirmed block what has votes for prev unconfirmed block.
         :return: confirm_Block
         """
+        util.logger.notice(f"-------------------confirm_prev_block---current_block is "
+                           f"tx count({len(current_block.body.transactions)}), "
+                           f"height({current_block.header.height})")
+
         candidate_blocks = ObjectManager().channel_service.block_manager.candidate_blocks
         with self.__confirmed_block_lock:
             logging.debug(f"BlockChain:confirm_block channel({self.__channel_name})")
@@ -642,7 +656,10 @@ class BlockChain:
                 logging.warning("It's not possible to add block while check block hash is fail-")
                 raise BlockchainError('확인하는 블럭 해쉬 값이 다릅니다.')
 
+            util.logger.notice(f"-------------------confirm_prev_block---before add block,"
+                               f"height({unconfirmed_block.header.height})")
             self.add_block(unconfirmed_block)
+            self.last_unconfirmed_block = current_block
             candidate_blocks.remove_block(current_block.header.prev_hash)
 
             return unconfirmed_block
